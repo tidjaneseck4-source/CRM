@@ -1,4 +1,3 @@
-Essayez l'IA directement dans vos applications préférées … Utilisez Gemini pour générer des brouillons et améliorer vos contenus, et accédez à l'IA nouvelle génération de Google avec Gemini Pro
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');

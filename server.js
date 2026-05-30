@@ -1,3 +1,4 @@
+Essayez l'IA directement dans vos applications préférées … Utilisez Gemini pour générer des brouillons et améliorer vos contenus, et accédez à l'IA nouvelle génération de Google avec Gemini Pro
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
@@ -10,137 +11,158 @@ app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static('public'));
 
-// ═══════════════════════════════════
-// SUPABASE
-// ═══════════════════════════════════
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
 
 // ═══════════════════════════════════
-// SCRAPING VINTED
+// SCRAPING VINTED — VERSION AMÉLIORÉE
 // ═══════════════════════════════════
 app.get('/api/scrape', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'URL manquante' });
 
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Cache-Control': 'no-cache',
+  };
+
   try {
-    // Extraire l'ID Vinted depuis l'URL
-    // Ex: https://www.vinted.fr/vetements/1234567890-nom → 1234567890
-    const idMatch = url.match(/\/(\d{6,})-/);
-    
-    // Headers qui imitent un vrai navigateur
-    const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Cache-Control': 'max-age=0',
-    };
-
-    // Essayer d'abord l'API Vinted si on a un ID
-    if (idMatch) {
-      const itemId = idMatch[1];
-      try {
-        const apiUrl = url.includes('vinted.fr') 
-          ? `https://www.vinted.fr/api/v2/items/${itemId}`
-          : `https://www.vinted.fr/api/v2/items/${itemId}`;
-        
-        const apiRes = await fetch(apiUrl, {
-          headers: {
-            ...headers,
-            'Accept': 'application/json, text/plain, */*',
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-          timeout: 8000
-        });
-        
-        if (apiRes.ok) {
-          const data = await apiRes.json();
-          const item = data.item || data;
-          
-          if (item && item.title) {
-            return res.json({
-              nom: item.title || '',
-              marque: item.brand_title || item.brand?.title || '',
-              taille: item.size_title || item.size?.title || '',
-              prix: item.price ? parseFloat(item.price) : null,
-              image: item.photos?.[0]?.full_size_url || item.photos?.[0]?.url || item.photo?.full_size_url || '',
-              photos: (item.photos || []).map(p => p.full_size_url || p.url).filter(Boolean),
-              couleur: item.colour_title || item.colour?.title || '',
-              vendeur: item.user?.login || '',
-              pays: item.user?.country_title || 'France',
-              description: item.description || '',
-            });
-          }
-        }
-      } catch(apiErr) {
-        console.log('API Vinted échouée, tentative scraping HTML...');
-      }
+    // Récupérer la page HTML
+    const pageRes = await fetch(url, { headers, timeout: 15000 });
+    if (!pageRes.ok) {
+      return res.status(422).json({ error: 'Page inaccessible (code ' + pageRes.status + '). Remplis manuellement.' });
     }
-
-    // Fallback : scraper la page HTML
-    const pageRes = await fetch(url, { headers, timeout: 10000 });
     const html = await pageRes.text();
     const $ = cheerio.load(html);
 
-    // Chercher les données JSON-LD (structured data)
-    let jsonLd = null;
-    $('script[type="application/ld+json"]').each((i, el) => {
-      try {
-        const data = JSON.parse($(el).html());
-        if (data['@type'] === 'Product' || data.name) {
-          jsonLd = data;
-        }
-      } catch(e) {}
-    });
+    let item = null;
 
-    // Chercher le JSON dans __NEXT_DATA__ (utilisé par Vinted)
-    let nextData = null;
+    // Méthode 1 : __NEXT_DATA__ (le plus fiable sur Vinted)
     try {
       const nextScript = $('script#__NEXT_DATA__').html();
       if (nextScript) {
         const nd = JSON.parse(nextScript);
-        const item = nd?.props?.pageProps?.item || nd?.props?.pageProps?.data?.item;
-        if (item) nextData = item;
+        item = nd?.props?.pageProps?.item
+          || nd?.props?.pageProps?.data?.item
+          || nd?.props?.pageProps?.itemDto
+          || nd?.props?.pageProps?.listing;
       }
     } catch(e) {}
 
-    // OpenGraph tags comme dernier recours
-    const ogTitle = $('meta[property="og:title"]').attr('content') || '';
-    const ogImage = $('meta[property="og:image"]').attr('content') || '';
-    const ogPrice = $('meta[property="product:price:amount"]').attr('content') || '';
+    // Méthode 2 : chercher dans les scripts inline
+    if (!item) {
+      $('script').each(function() {
+        const content = $(this).html() || '';
+        // Pattern Vinted : {"item":{"id":...}}
+        const m = content.match(/"item"\s*:\s*(\{[^<]{100,}\})/);
+        if (m && !item) {
+          try {
+            const parsed = JSON.parse(m[1]);
+            if (parsed.title) item = parsed;
+          } catch(e) {}
+        }
+      });
+    }
 
-    const result = {
-      nom: nextData?.title || jsonLd?.name || ogTitle || '',
-      marque: nextData?.brand_title || jsonLd?.brand?.name || '',
-      taille: nextData?.size_title || '',
-      prix: nextData?.price ? parseFloat(nextData.price) : (ogPrice ? parseFloat(ogPrice) : null),
-      image: nextData?.photos?.[0]?.full_size_url || jsonLd?.image || ogImage || '',
+    // Méthode 3 : JSON-LD structured data
+    let jsonLd = null;
+    if (!item) {
+      $('script[type="application/ld+json"]').each(function() {
+        try {
+          const d = JSON.parse($(this).html());
+          if (d['@type'] === 'Product' && !jsonLd) jsonLd = d;
+        } catch(e) {}
+      });
+    }
+
+    // Construire le résultat
+    let result = {
+      nom: '',
+      marque: '',
+      taille: '',
+      prix: null,
+      image: '',
+      imageBase64: null,
       photos: [],
-      couleur: nextData?.colour_title || '',
-      vendeur: nextData?.user?.login || '',
-      pays: nextData?.user?.country_title || 'France',
-      description: nextData?.description || jsonLd?.description || '',
+      couleur: '',
+      vendeur: '',
+      pays: 'France',
+      description: '',
     };
 
+    if (item && item.title) {
+      result.nom = item.title || '';
+      result.marque = item.brand_title || item.brand?.title || '';
+      result.taille = item.size_title || item.size?.title || '';
+      result.couleur = item.colour_title || item.colour?.title || '';
+      result.vendeur = item.user?.login || '';
+      result.pays = item.user?.country_title || 'France';
+      result.description = item.description || '';
+
+      // Prix
+      if (item.price) result.prix = parseFloat(String(item.price).replace(',', '.'));
+      else if (item.price_numeric) result.prix = parseFloat(item.price_numeric);
+
+      // Photos
+      const photoList = item.photos || (item.photo ? [item.photo] : []);
+      result.photos = photoList.slice(0, 5).map(function(p) {
+        return p.full_size_url || p.url || p.high_resolution?.url || '';
+      }).filter(Boolean);
+      result.image = result.photos[0] || '';
+
+    } else if (jsonLd) {
+      result.nom = jsonLd.name || '';
+      result.marque = jsonLd.brand?.name || '';
+      result.image = Array.isArray(jsonLd.image) ? jsonLd.image[0] : (jsonLd.image || '');
+      if (jsonLd.offers?.price) result.prix = parseFloat(jsonLd.offers.price);
+
+    } else {
+      // Fallback OpenGraph
+      result.nom = $('meta[property="og:title"]').attr('content') || $('title').text().split('|')[0].trim() || '';
+      result.image = $('meta[property="og:image"]').attr('content') || '';
+      const priceTag = $('meta[property="product:price:amount"]').attr('content');
+      if (priceTag) result.prix = parseFloat(priceTag);
+    }
+
+    // Récupérer la photo et la convertir en base64 (pour stockage permanent)
+    if (result.image) {
+      try {
+        const imgRes = await fetch(result.image, {
+          headers: { 'User-Agent': headers['User-Agent'], 'Referer': 'https://www.vinted.fr/' },
+          timeout: 10000
+        });
+        if (imgRes.ok) {
+          const buf = await imgRes.buffer();
+          const ct = imgRes.headers.get('content-type') || 'image/jpeg';
+          // Limiter à 1.5Mo pour Supabase
+          if (buf.length < 1500000) {
+            result.imageBase64 = 'data:' + ct + ';base64,' + buf.toString('base64');
+          }
+        }
+      } catch(e) {
+        console.log('Photo non récupérée:', e.message);
+      }
+    }
+
     if (!result.nom) {
-      return res.status(422).json({ 
-        error: 'Impossible de récupérer les données de cette annonce. Vinted a peut-être bloqué la requête. Remplis les champs manuellement.',
+      return res.status(422).json({
+        error: 'Données non trouvées. Vinted a peut-être changé sa structure. Remplis manuellement.',
         partiel: result
       });
     }
 
+    console.log('Scraping OK:', result.nom, '|', result.marque, '|', result.prix + '€');
     res.json(result);
+
   } catch(e) {
     console.error('Scraping error:', e.message);
-    res.status(500).json({ error: 'Erreur réseau : ' + e.message });
+    res.status(500).json({ error: 'Erreur réseau: ' + e.message });
   }
 });
 
@@ -149,47 +171,35 @@ app.get('/api/scrape', async (req, res) => {
 // ═══════════════════════════════════
 app.get('/api/articles', async (req, res) => {
   const { data, error } = await supabase
-    .from('articles')
-    .select('*')
-    .order('created_at', { ascending: false });
+    .from('articles').select('*').order('created_at', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
 
 app.get('/api/articles/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('articles')
-    .select('*')
-    .eq('id', req.params.id)
-    .single();
+    .from('articles').select('*').eq('id', req.params.id).single();
   if (error) return res.status(404).json({ error: error.message });
   res.json(data);
 });
 
 app.post('/api/articles', async (req, res) => {
   const { data, error } = await supabase
-    .from('articles')
-    .insert([req.body])
-    .select();
+    .from('articles').insert([req.body]).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json(data[0]);
 });
 
 app.put('/api/articles/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('articles')
-    .update(req.body)
-    .eq('id', req.params.id)
-    .select();
+    .from('articles').update(req.body).eq('id', req.params.id).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json(data[0]);
 });
 
 app.delete('/api/articles/:id', async (req, res) => {
   const { error } = await supabase
-    .from('articles')
-    .delete()
-    .eq('id', req.params.id);
+    .from('articles').delete().eq('id', req.params.id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });
@@ -199,47 +209,35 @@ app.delete('/api/articles/:id', async (req, res) => {
 // ═══════════════════════════════════
 app.get('/api/depenses', async (req, res) => {
   const { data, error } = await supabase
-    .from('depenses')
-    .select('*')
-    .order('created_at', { ascending: false });
+    .from('depenses').select('*').order('created_at', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
 
 app.post('/api/depenses', async (req, res) => {
   const { data, error } = await supabase
-    .from('depenses')
-    .insert([req.body])
-    .select();
+    .from('depenses').insert([req.body]).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json(data[0]);
 });
 
 app.put('/api/depenses/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('depenses')
-    .update(req.body)
-    .eq('id', req.params.id)
-    .select();
+    .from('depenses').update(req.body).eq('id', req.params.id).select();
   if (error) return res.status(500).json({ error: error.message });
   res.json(data[0]);
 });
 
 app.delete('/api/depenses/:id', async (req, res) => {
   const { error } = await supabase
-    .from('depenses')
-    .delete()
-    .eq('id', req.params.id);
+    .from('depenses').delete().eq('id', req.params.id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });
 
-// Toutes les autres routes → index.html
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`ResellCRM en ligne sur le port ${PORT} ✅`);
-});
+app.listen(PORT, () => console.log('ResellCRM en ligne port ' + PORT + ' ✅'));
